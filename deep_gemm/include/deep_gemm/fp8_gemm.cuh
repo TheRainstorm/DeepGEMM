@@ -32,7 +32,7 @@ template <uint32_t SHAPE_N, uint32_t SHAPE_K,
           uint32_t kNumGroups, uint32_t kNumStages,
           uint32_t kNumTMAThreads, uint32_t kNumMathThreadsPerGroup,
           uint32_t kNumTMAMulticast,
-          GemmType kGemmType>
+          GemmType kGemmType, uint32_t LHS_E5M2>
 __global__ void __launch_bounds__(get_num_threads_per_sm<kNumTMAThreads, kNumMathThreadsPerGroup>(BLOCK_M), 1)
 fp8_gemm_kernel(__nv_bfloat16* gmem_d, float* scales_b, int* grouped_layout,
                 uint32_t shape_m,
@@ -46,7 +46,7 @@ fp8_gemm_kernel(__nv_bfloat16* gmem_d, float* scales_b, int* grouped_layout,
     DG_STATIC_ASSERT(ceil_div(BLOCK_N, BLOCK_K) == 1, "Too much B scales in a single block");
 
     // Types
-    using WGMMA = typename FP8MMASelector<BLOCK_N>::type;
+    using WGMMA = typename FP8MMASelector<BLOCK_N, LHS_E5M2>::type;
     using Barrier = cutlass::arch::ClusterTransactionBarrier;
 
     // Shared memory
@@ -81,7 +81,8 @@ fp8_gemm_kernel(__nv_bfloat16* gmem_d, float* scales_b, int* grouped_layout,
 
     // Data on shared memory
     auto smem_d = reinterpret_cast<__nv_bfloat16*>(smem_buffer);
-    __nv_fp8_e4m3* smem_a[kNumStages];
+    using SMemAType = typename std::conditional<LHS_E5M2, __nv_fp8_e5m2*, __nv_fp8_e4m3*>::type;
+    SMemAType smem_a[kNumStages];
     __nv_fp8_e4m3* smem_b[kNumStages];
     float* smem_scales_a[kNumStages];
     float* smem_scales_b;
@@ -93,7 +94,11 @@ fp8_gemm_kernel(__nv_bfloat16* gmem_d, float* scales_b, int* grouped_layout,
     // Fill shared memory pointers
     #pragma unroll
     for (int i = 0; i < kNumStages; ++ i) {
-        smem_a[i] = reinterpret_cast<__nv_fp8_e4m3*>(smem_buffer + SMEM_D_SIZE + i * SMEM_A_SIZE_PER_STAGE);
+        if constexpr (LHS_E5M2==1){
+            smem_a[i] = reinterpret_cast<__nv_fp8_e5m2*>(smem_buffer + SMEM_D_SIZE + i * SMEM_A_SIZE_PER_STAGE);
+        }else{
+            smem_a[i] = reinterpret_cast<__nv_fp8_e4m3*>(smem_buffer + SMEM_D_SIZE + i * SMEM_A_SIZE_PER_STAGE);
+        }
         smem_b[i] = reinterpret_cast<__nv_fp8_e4m3*>(smem_buffer + SMEM_D_SIZE + kNumStages * SMEM_A_SIZE_PER_STAGE + i * SMEM_B_SIZE_PER_STAGE);
         smem_scales_a[i] = reinterpret_cast<float*>(smem_buffer + SMEM_D_SIZE + kNumStages * (SMEM_A_SIZE_PER_STAGE + SMEM_B_SIZE_PER_STAGE) + i * SMEM_SCALES_A_SIZE_PER_STAGE);
     }
@@ -348,7 +353,7 @@ template <uint32_t SHAPE_N, uint32_t SHAPE_K,
           uint32_t BLOCK_M, uint32_t BLOCK_N, uint32_t BLOCK_K,
           uint32_t kNumGroups, uint32_t kNumStages,
           uint32_t kNumTMAMulticast,
-          GemmType kGemmType>
+          GemmType kGemmType, uint32_t LHS_E5M2>
 class Gemm {
 private:
     using Barrier = cuda::barrier<cuda::thread_scope_block>;
@@ -369,7 +374,7 @@ public:
         constexpr uint32_t kNumMathThreadsPerGroup = 128;
         auto kernel = fp8_gemm_kernel<SHAPE_N, SHAPE_K, BLOCK_M, BLOCK_N, BLOCK_K,
                                       kNumGroups, kNumStages, kNumTMAThreads, kNumMathThreadsPerGroup,
-                                      kNumTMAMulticast, kGemmType>;
+                                      kNumTMAMulticast, kGemmType, LHS_E5M2>;
         DG_HOST_ASSERT(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size) == cudaSuccess);
 
         // Cluster launch

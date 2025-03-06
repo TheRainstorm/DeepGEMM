@@ -5,6 +5,8 @@ build
 dist
 *.egg-info
 *.pyc
+.vscode
+*.log
 
 # Third-party links created by `setup.py develop`
 deep_gemm/include/cute
